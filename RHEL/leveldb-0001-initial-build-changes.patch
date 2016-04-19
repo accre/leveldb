@@ -1,0 +1,116 @@
+diff -ur leveldb.orig/build_detect_platform leveldb/build_detect_platform
+--- leveldb.orig/build_detect_platform	2016-04-18 10:12:56.893673349 -0500
++++ leveldb/build_detect_platform	2016-04-18 13:41:48.017343898 -0500
+@@ -50,7 +50,8 @@
+ PLATFORM_CCFLAGS=
+ PLATFORM_CXXFLAGS=
+ PLATFORM_LDFLAGS=
+-PLATFORM_SHARED_EXT=
++PLATFORM_STATIC_LDFLAGS=
++PLATFORM_SHARED_EXT="so"
+ PLATFORM_SHARED_LDFLAGS="-shared -Wl,-soname -Wl,"
+ PLATFORM_SHARED_CFLAGS="-fPIC"
+ PLATFORM_SHARED_VERSIONED=true
+@@ -166,6 +167,15 @@
+         COMMON_FLAGS="$COMMON_FLAGS -DLEVELDB_PLATFORM_POSIX"
+     fi
+ 
++    # Test whether tcmalloc is available
++    $CXX $CFLAGS -x c++ - -o /dev/null -ltcmalloc 2>/dev/null  <<EOF
++      int main() {}
++EOF
++    if [ "$?" = 0 ]; then
++        PLATFORM_LDFLAGS="$PLATFORM_LDFLAGS -ltcmalloc"
++    fi
++fi
++
+     # Test whether Snappy library is installed
+     # http://code.google.com/p/snappy/
+     $CXX $CFLAGS -x c++ - -o /dev/null 2>/dev/null  <<EOF
+@@ -176,21 +186,14 @@
+         COMMON_FLAGS="$COMMON_FLAGS -DSNAPPY"
+         if [ "$PLATFORM" = "OS_LINUX" ]; then
+             # Basho: switching to static snappy library to make tools more portable
+-            PLATFORM_LDFLAGS="$PLATFORM_LDFLAGS -Wl,-non_shared -lsnappy -Wl,-call_shared"
++            PLATFORM_STATIC_LDFLAGS="$PLATFORM_STATIC_LDFLAGS -Wl,-non_shared -lsnappy -Wl,-call_shared"
++            # ...but we need to use that dynamic snappy library when creating the leveldb shared library
++            PLATFORM_SHARED_LDFLAGS="-lsnappy $PLATFORM_SHARED_LDFLAGS"
+         else
+             PLATFORM_LDFLAGS="$PLATFORM_LDFLAGS -lsnappy"
+         fi
+     fi
+ 
+-    # Test whether tcmalloc is available
+-    $CXX $CFLAGS -x c++ - -o /dev/null -ltcmalloc 2>/dev/null  <<EOF
+-      int main() {}
+-EOF
+-    if [ "$?" = 0 ]; then
+-        PLATFORM_LDFLAGS="$PLATFORM_LDFLAGS -ltcmalloc"
+-    fi
+-fi
+-
+ PLATFORM_CCFLAGS="$PLATFORM_CCFLAGS $COMMON_FLAGS $VERSION_FLAGS"
+ PLATFORM_CXXFLAGS="$PLATFORM_CXXFLAGS $COMMON_FLAGS $VERSION_FLAGS"
+ 
+@@ -200,6 +203,7 @@
+ echo "PLATFORM_LDFLAGS=$PLATFORM_LDFLAGS" >> $OUTPUT
+ echo "PLATFORM_CCFLAGS=$PLATFORM_CCFLAGS" >> $OUTPUT
+ echo "PLATFORM_CXXFLAGS=$PLATFORM_CXXFLAGS" >> $OUTPUT
++echo "PLATFORM_STATIC_LDFLAGS=$PLATFORM_STATIC_LDFLAGS" >> $OUTPUT
+ echo "PLATFORM_SHARED_CFLAGS=$PLATFORM_SHARED_CFLAGS" >> $OUTPUT
+ echo "PLATFORM_SHARED_EXT=$PLATFORM_SHARED_EXT" >> $OUTPUT
+ echo "PLATFORM_SHARED_LDFLAGS=$PLATFORM_SHARED_LDFLAGS" >> $OUTPUT
+diff -ur leveldb.orig/Makefile leveldb/Makefile
+--- leveldb.orig/Makefile	2016-04-18 10:12:56.893673349 -0500
++++ leveldb/Makefile	2016-04-18 13:41:49.053308513 -0500
+@@ -5,6 +5,10 @@
+ # Inherit some settings from environment variables, if available
+ INSTALL_PATH ?= $(CURDIR)
+ 
++PREFIX ?= /usr/local
++LIBDIR ?= lib
++INCLUDEDIR ?= include
++
+ #-----------------------------------------------
+ # Uncomment exactly one of the lines labelled (A), (B), and (C) below
+ # to switch between compilation modes.
+@@ -53,7 +57,7 @@
+ # static link leveldb to tools to simplify platform usage (if Linux)
+ #
+ ifeq ($(PLATFORM),OS_LINUX)
+-LEVEL_LDFLAGS := -L . -Wl,-non_shared -lleveldb -Wl,-call_shared
++LEVEL_LDFLAGS := -L . -Wl,-non_shared -lleveldb $(PLATFORM_STATIC_LDFLAGS) -Wl,-call_shared
+ else
+ LEVEL_LDFLAGS := -L . -lleveldb
+ endif
+@@ -87,7 +91,20 @@
+ 
+ endif  # PLATFORM_SHARED_EXT
+ 
+-all: $(SHARED) $(LIBRARY)
++all: $(SHARED) $(LIBRARY) $(MEMENVLIBRARY)
++
++install: all
++	install -d $(DESTDIR)$(PREFIX)/$(LIBDIR)
++	install -d $(DESTDIR)$(PREFIX)/$(INCLUDEDIR)/leveldb/helpers
++	install -m 0644 $(LIBRARY) $(DESTDIR)$(PREFIX)/$(LIBDIR)
++	install -m 0644 $(MEMENVLIBRARY) $(DESTDIR)$(PREFIX)/$(LIBDIR)
++ifneq ($(PLATFORM_SHARED_EXT),)
++	install -m 0644 $(SHARED3) $(DESTDIR)$(PREFIX)/$(LIBDIR)
++	cd $(DESTDIR)$(PREFIX)/$(LIBDIR) && ln -sf $(SHARED3) $(SHARED2)
++	cd $(DESTDIR)$(PREFIX)/$(LIBDIR) && ln -sf $(SHARED3) $(SHARED1)
++endif
++	install -m 0644 include/leveldb/* $(DESTDIR)$(PREFIX)/$(INCLUDEDIR)/leveldb
++	install -m 0644 helpers/memenv/*.h $(DESTDIR)$(PREFIX)/$(INCLUDEDIR)/leveldb/helpers
+ 
+ test check: all $(PROGRAMS) $(TESTS)
+ 	for t in $(TESTS); do echo "***** Running $$t"; ./$$t || exit 1; done
+@@ -155,7 +172,7 @@
+ 	$(AR) -rs $@ $(MEMENVOBJECTS)
+ 
+ memenv_test : helpers/memenv/memenv_test.o $(MEMENVLIBRARY) $(LIBRARY) $(TESTHARNESS)
+-	$(CXX) helpers/memenv/memenv_test.o $(MEMENVLIBRARY) $(LIBRARY) $(TESTHARNESS) -o $@ $(LDFLAGS)
++	$(CXX) helpers/memenv/memenv_test.o $(MEMENVLIBRARY) $(LIBRARY) $(TESTHARNESS) -o $@ $(LDFLAGS) $(PLATFORM_STATIC_LDFLAGS)
+ 
+ #
+ # IOS build
